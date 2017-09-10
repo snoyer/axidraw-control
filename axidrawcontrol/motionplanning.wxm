@@ -1,0 +1,37 @@
+/* [wxMaxima batch file version 1] [ DO NOT EDIT BY HAND! ]*/
+/* [ Created with wxMaxima version 15.08.2 ] */
+
+/* [wxMaxima: section start ]
+Triangle case
+   [wxMaxima: section end   ] */
+
+/* [wxMaxima: input   start ] */
+Va: v_top = v0 + accel * t_accel;
+Vb: v_top = v1 + decel * t_decel;
+Da: d_accel = v0*t_accel + (accel/2) * t_accel^2;
+Dd: d_decel = v1*t_decel + (decel/2) * t_decel^2;
+D: d = d_accel + d_decel;
+/* [wxMaxima: input   end   ] */
+
+/* [wxMaxima: input   start ] */
+Td: solve(subst(Va,Vb), t_decel)[1];
+D2: subst([Da,Dd], D);
+Ta: solve(subst(Td,D2), t_accel)[2];
+/* [wxMaxima: input   end   ] */
+
+/* [wxMaxima: section start ]
+Linear case
+   [wxMaxima: section end   ] */
+
+/* [wxMaxima: input   start ] */
+T: t = (v1-v0)/a;
+D: d =v0*t+a/2*t^2;
+/* [wxMaxima: input   end   ] */
+
+/* [wxMaxima: input   start ] */
+T1: solve(D, t)[2];
+V1: solve(T, v1);
+/* [wxMaxima: input   end   ] */
+
+/* Maxima can't load/batch files which end with a comment! */
+"Created with wxMaxima"$
