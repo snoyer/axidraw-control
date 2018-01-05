@@ -40,21 +40,21 @@ class EBB(object):
 
 
     def run(self, *commands):
-        return b''.join(self.run_commands_iter(commands))
+        return bytearray().join(self.run_commands_iter(commands))
 
 
-    def run_commands_iter(self, commands):
-        return list(self.run_commands(commands))
+    def run_commands(self, commands):
+        return list(self.run_commands_iter(commands))
 
 
     def run_commands_iter(self, commands):
         for command in commands:
             cmd_bytes = self.parse_command(command)
 
-            logger.debug('-> %s', cmd_bytes)
+            logger.debug('-> %s', repr(cmd_bytes))
             self._serialport.write(cmd_bytes)
             response = self.read_response(cmd_bytes)
-            logger.debug('<- %s', response)
+            logger.debug('<- %s', repr(response))
             yield response
 
 
@@ -83,13 +83,13 @@ class EBB(object):
         for i in range(32): # arbitrary number of retries so we never hang forever
             response += self._serialport.readline()
             if ok(response):
-                return response
+                return bytearray(response)
             if error(response):
                 raise EBBSerialError('%s %s' % (cmd, EBB.decode(response).strip()))
 
         # we didn't exit early, some termination cases must be missing :/
         logger.warn('unexpected response: %s %s', cmd, response)
-        return response
+        return bytearray(response)
 
 
 
@@ -117,15 +117,15 @@ class EBB(object):
 
     @staticmethod
     def parse_command(cmd):
-        if isinstance(cmd, bytes):
+        if isinstance(cmd, bytearray):
             # cmd is already bytes: just pass it along
             return cmd
         if isinstance(cmd, str):
             # cmd is a string: ensure it is '\r'-terminated and encode to bytes
-            return bytes(cmd if cmd.endswith('\r') else cmd+'\r', EBB.ENCODING)
+            return bytearray(cmd if cmd.endswith('\r') else cmd+'\r', EBB.ENCODING)
         if isinstance(cmd, tuple):
             # cmd is a tuple: convert each element, join with comma, encode to bytes
-            return bytes(','.join(EBB.parse_tuple_command_iter(*cmd))+'\r', EBB.ENCODING)
+            return bytearray(','.join(EBB.parse_tuple_command_iter(*cmd))+'\r', EBB.ENCODING)
 
     @staticmethod
     def parse_tuple_command_iter(*values):
@@ -139,7 +139,7 @@ class EBB(object):
     @staticmethod
     def decode(bytes_str):
         """decode response bytes to a string"""
-        return str(bytes_str, EBB.ENCODING)
+        return bytes_str.decode(EBB.ENCODING)
 
 
     @staticmethod

@@ -65,7 +65,8 @@ def interpolate_velocity_profile(profile, timestep):
         for t,v in zip(ts2,vs2):
             yield t, v, min(integrate(ts, vs, 0, t), d1)
     else:
-        yield from zip(ts,vs,ds)
+        for tvd in zip(ts,vs,ds):
+            yield tvd
 
 
 
@@ -121,19 +122,21 @@ def cornering_max_velocities(normed_vectors, max_accel, tolerance, epsilon=1e-8)
     see https://onehossshay.wordpress.com/2011/09/24/improving_grbl_cornering_algorithm/
     """
 
-    yield math.inf # no angle at first point
+    infinity = float('inf')
+
+    yield infinity # no angle at first point
 
     for u,v in pairwise(normed_vectors):
         dot = u.real*v.real + u.imag*v.imag
         cos_angle = -dot
-        sin_half_angle = sqrt((1-cos_angle)/2)
+        sin_half_angle = sqrt((1-cos_angle)/2.)
         if 1-sin_half_angle > epsilon: # avoid division by zero
-            r = tolerance * sin_half_angle / (1-sin_half_angle)
+            r = tolerance * sin_half_angle / (1.-sin_half_angle)
             yield sqrt(max_accel * r)
         else:
-            yield math.inf
+            yield infinity
 
-    yield math.inf # no angle at last point
+    yield infinity # no angle at last point
 
 
 def base_velocity_profile(d, v0, v1, v_max, accel, decel):
@@ -152,16 +155,20 @@ def base_velocity_profile(d, v0, v1, v_max, accel, decel):
     if d==0:
         return []
 
-    accel = abs(accel)
-    decel = abs(decel)
+    d = float(d)
+    v0 = float(v0)
+    v1 = float(v1)
+    v_max = float(v_max)
+    accel = float(accel)
+    decel = float(decel)
 
     if v0 > v_max: raise ValueError('v0 > v_max')
     if v1 > v_max: raise ValueError('v1 > v_max')
     if v0 < 0: raise ValueError('v0 < 0')
     if v1 < 0: raise ValueError('v1 < 0')
     if v_max <= 0: raise ValueError('v_max <= 0')
-    if accel <= 0: raise ValueError('accel == 0')
-    if decel <= 0: raise ValueError('decel == 0')
+    if accel <= 0: raise ValueError('accel <= 0')
+    if decel <= 0: raise ValueError('decel <= 0')
 
 
     # ideally we'd like to be able to accelerate to v_max and cruise
@@ -239,8 +246,9 @@ def integrate(xs, ys, x0, x1):
 
     def final_xs():
         yield x0
-        yield from itertools.takewhile(lambda x:x <  x1,
-                   itertools.dropwhile(lambda x:x <= x0, xs))
+        for x in itertools.takewhile(lambda x:x <  x1,
+                 itertools.dropwhile(lambda x:x <= x0, xs)):
+            yield x
         yield x1
 
     xs2 = list(final_xs())

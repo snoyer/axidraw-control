@@ -1,6 +1,6 @@
 # Axidraw control
 
-Python 3 module to interface with the [AxiDraw Drawing Machine](https://www.axidraw.com/) from Evil Mad Scientist.
+Python module to interface with the [AxiDraw Drawing Machine](https://www.axidraw.com/) from Evil Mad Scientist.
 
 
 ## Hardware abstraction

@@ -93,7 +93,7 @@ class AxidrawControl(object):
         """
         if not self._pen_up_speed:
             raise AxidrawError('servo not configured yet')
-        return (self._pen_up_pos - self._pen_down_pos) / self._pen_up_speed
+        return (self._pen_up_pos - self._pen_down_pos) / float(self._pen_up_speed)
 
     def safe_pen_down_delay(self):
         """Compute duration for pen down movement based on servo configuration.
@@ -102,7 +102,7 @@ class AxidrawControl(object):
         """
         if not self._pen_down_speed:
             raise AxidrawError('servo not configured yet')
-        return (self._pen_up_pos - self._pen_down_pos) / self._pen_down_speed
+        return (self._pen_up_pos - self._pen_down_pos) / float(self._pen_down_speed)
 
 
     def is_pen_up(self):
@@ -135,11 +135,11 @@ class AxidrawControl(object):
 
 
     def disable_motors(self):
-        """Send a ""disable motors' command to the EBB."""
+        """Send a "disable motors" command to the EBB."""
         self._ebb.run(('EM', 0, 0))
 
     def enable_motors(self, highres=True):
-        """Send a ""enable motors' command to the EBB.
+        """Send a "enable motors" command to the EBB.
         The micro-stepping will be set to 16x if `highres` is `True` (default) or 8x otherwise
 
         :param highres: wether to use 16x or 8x micro-stepping
@@ -153,7 +153,7 @@ class AxidrawControl(object):
 
         # update step counters in case we change resolution multiple times
         if old_microstepping_scale and old_microstepping_scale != self._microstepping_scale:
-            factor = old_microstepping_scale / self._microstepping_scale
+            factor = old_microstepping_scale / float(self._microstepping_scale)
             self._steps_counter *= factor
 
 
@@ -206,7 +206,7 @@ class AxidrawControl(object):
             pass
 
         self.disable_motors()
-    
+
 
     def move_by_steps(self, vectors, motion_constraints):
         """Perform pen movements in hardware space.
@@ -252,8 +252,8 @@ class AxidrawControl(object):
 
         return motionplanning.Constraints(
             v_max = lerp(speed, 0,1, MIN_MOTOR_SPEED, MAX_MOTOR_SPEED),
-            accel = lerp(accel, 0,1, MIN_ACCELERATION, MAX_ACCELERATION) / self._microstepping_scale,
-            decel = lerp(accel, 0,1, MIN_ACCELERATION, MAX_ACCELERATION) / self._microstepping_scale,
+            accel = lerp(accel, 0,1, MIN_ACCELERATION, MAX_ACCELERATION) / float(self._microstepping_scale),
+            decel = lerp(accel, 0,1, MIN_ACCELERATION, MAX_ACCELERATION) / float(self._microstepping_scale),
             cornering_tolerance = lerp(cornering, 0,1, 0.1, 1), #TODO figure out correct bounds
         )
 
@@ -271,7 +271,7 @@ class AxidrawControl(object):
 
         if not self._microstepping_scale:
             raise AxidrawError('motors not enabled')
-        steps_per_mm = STEPS_PER_MM_AT_16X / self._microstepping_scale
+        steps_per_mm = STEPS_PER_MM_AT_16X / float(self._microstepping_scale)
 
         x_steps = x * steps_per_mm
         y_steps = y * steps_per_mm
