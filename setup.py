@@ -8,4 +8,7 @@ setup(name='axidrawcontrol',
     author_email='reach me on github',
     packages=['axidrawcontrol'],
     zip_safe=False,
+    install_requires=[
+        'pyserial', 'numpy'
+    ],
 )
