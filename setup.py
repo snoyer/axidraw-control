@@ -9,6 +9,6 @@ setup(name='axidrawcontrol',
     packages=['axidrawcontrol'],
     zip_safe=False,
     install_requires=[
-        'pyserial', 'numpy'
+        'pyserial', 'numpy', 'pdfrw',
     ],
 )

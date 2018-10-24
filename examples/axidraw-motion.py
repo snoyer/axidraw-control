@@ -1,6 +1,7 @@
+import os
 import logging
 
-from axidrawcontrol import AxidrawControl, AxidrawError
+from axidrawcontrol import Axidraw, EBBSerialError
 
 def read_trajectory(path):
     for line in open(path):
@@ -13,24 +14,33 @@ if __name__ == '__main__':
     logging.getLogger('axidrawcontrol.ebb').setLevel(logging.WARN)
     logging.getLogger('axidrawcontrol.motionplanning').setLevel(logging.WARN)
     try:
-        xys = list(read_trajectory('trajectory1.txt'))
+        xys = list(read_trajectory(os.path.join(os.path.dirname(__file__), 'trajectory1.txt')))
 
-        with AxidrawControl() as axidraw:
-            axidraw.setup_servo(0, 1, 2,2)
-            axidraw.enable_motors(highres=True)
+        speed_settings = .5,.5,.1
+        with Axidraw() as axidraw:
+            axidraw.pen_up_pos = 1
+            axidraw.pen_up_speed = 2
+            axidraw.raise_pen()
 
-            axidraw.pen_down()
-            axidraw.move_to(xys, (1,1,.75))
-            axidraw.pen_up()
+            axidraw.microstepping = 16
+            axidraw.move_to(xys, speed_settings)
+            axidraw.wait_until_stopped()
 
-            axidraw.enable_motors(highres=False)
-            axidraw.pen_down()
-            axidraw.move_to(xys, (1,1,.75))
-            axidraw.pen_up()
+            axidraw.microstepping = 8
+            axidraw.move_to(xys, speed_settings)
+            axidraw.wait_until_stopped()
 
-            axidraw.park()
+            axidraw.microstepping = 4
+            axidraw.move_to(xys, speed_settings)
+            axidraw.wait_until_stopped()
+
+            axidraw.microstepping = 16
+            axidraw.move_to([(0,0)], speed_settings)
+            axidraw.wait_until_stopped()
+
             axidraw.disable_motors()
 
+            print(axidraw.current_position)
 
-    except AxidrawError as e:
+    except EBBSerialError as e:
         print('error:', e)

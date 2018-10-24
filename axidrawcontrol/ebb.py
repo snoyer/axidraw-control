@@ -1,4 +1,7 @@
+from collections import namedtuple
 import serial
+import time
+import threading
 import logging
 
 
@@ -9,34 +12,48 @@ class EBBSerialError(IOError):
     pass
 
 
+
 class EBB(object):
     ENCODING = 'ascii'
+    READ_TIMEOUT = 0.025
+    TOTAL_TMEOUT = 2
 
 
-    def __init__(self, port=None, timeout=1.0):
+    def __init__(self, port=None):
         if not port:
-            found_ports = list(self.find_ports())
+            found_ports = list(find_EBB_ports())
             if found_ports:
-                port = found_ports[0]
                 if len(found_ports) > 1:
                     logger.warn('found %d connected EBBs, using first one', len(found_ports))
+                port = min(found_ports)
             else:
                 raise EBBSerialError('could not find any connected EBB')
 
-        try:
-            logger.info('opening serial port')
-            serialport = serial.Serial(port, timeout=timeout)
-            if not self.check_serialport(serialport):
-                serialport.close()
-                logger.warn('EBB check failed, closing serial port')
-                raise EBBSerialError('could not confirm EBB version on %s' % port)
+        self.open(port)
 
-            self._serialport = serialport
+
+    def open(self, port):
+        try:
+            logger.debug('opening serial port `%s`', port)
+            self.serialport = serial.Serial(port, timeout=self.READ_TIMEOUT)
+            ebb_info = check_serialport(self.serialport)
+            if not ebb_info:
+                self.serialport.close()
+                logger.warn('EBB check failed, closing serial port')
+                raise EBBSerialError('could not confirm EBB version on port %s' % port)
+            else:
+                logger.info('confirmed EBB board %s on port `%s`', ebb_info, port)
+                self.serialport.reset_input_buffer()
         except OSError as e:
             if e.errno == 16:
-                raise EBBSerialError('EBB busy')
+                raise EBBSerialError('port `%s` busy' % port)
             else:
                 raise EBBSerialError(e.strerror)
+
+
+    def reopen(self):
+        self.close()
+        self.open(self.serialport.port)
 
 
     def run(self, *commands):
@@ -52,9 +69,12 @@ class EBB(object):
             cmd_bytes = self.parse_command(command)
 
             logger.debug('-> %s', repr(cmd_bytes))
-            self._serialport.write(cmd_bytes)
+            t0 = time.time()
+            self.serialport.reset_input_buffer()
+            self.serialport.write(cmd_bytes)
             response = self.read_response(cmd_bytes)
-            logger.debug('<- %s', repr(response))
+            t1 = time.time()
+            logger.debug('<- %s (%fs)', repr(response), t1-t0)
             yield response
 
 
@@ -66,22 +86,24 @@ class EBB(object):
             return r.endswith(endswith + b'\r\n') \
                 or r.endswith(endswith + b'\n\r')
 
-        # stop predicate to know when to stop reading the output stream
+        # preicate matching a complete successful response
         def ok(r):
             #FIXME handle other commands that don't end response with `OK<NL><CR>`
             if cmd.lower() in [b'v\r', b'qm\r'] :
                 return nlcr_terminated(r)
-            return nlcr_terminated(r, endswith=b'OK')
+            else:
+                return nlcr_terminated(r, endswith=b'OK')
 
-        # stop predicate to know when to stop reading the output stream
+        # preicate matching a complete unsuccessful response
         def error(r):
             return r.startswith(b'!') and nlcr_terminated(r)
 
 
         # accumulate fragments until the whole string looks like a complete response
         response = b''
-        for i in range(32): # arbitrary number of retries so we never hang forever
-            response += self._serialport.readline()
+        giveup_time = time.time() + self.TOTAL_TMEOUT
+        while time.time() < giveup_time:
+            response += self.serialport.readline()
             if ok(response):
                 return bytearray(response)
             if error(response):
@@ -92,13 +114,13 @@ class EBB(object):
         return bytearray(response)
 
 
-
     def close(self):
-        if self._serialport:
+        if self.serialport:
             logger.info('closing serial port')
-            self._serialport.close()
+            self.serialport.close()
         else:
             logger.warn('no serial port to close')
+
 
     def __enter__(self):
         return self
@@ -107,17 +129,18 @@ class EBB(object):
         self.close()
 
 
+    @property
     def port(self):
-        return self._serialport.port
+        return self.serialport.port
 
 
     def __str__(self):
-        return '<EBB on %s>' % self.port()
+        return '<EBB on %s>' % self.port
 
 
     @staticmethod
     def parse_command(cmd):
-        if isinstance(cmd, bytearray):
+        if isinstance(cmd, (bytes, bytearray)):
             # cmd is already bytes: just pass it along
             return cmd
         if isinstance(cmd, str):
@@ -142,26 +165,49 @@ class EBB(object):
         return bytes_str.decode(EBB.ENCODING)
 
 
-    @staticmethod
-    def find_ports():
-        """Iterate over ports that look like they're an EBB"""
+def find_EBBs():
+    for port in find_EBB_ports():
         try:
-            import serial.tools.list_ports
-            for port, desc, hwid in serial.tools.list_ports.comports():
-                if desc.startswith("EiBotBoard") \
-                or hwid.startswith("USB VID:PID=04D8:FD92"):
-                    yield port
-        except ImportError:
-            logger.error('could not import `serial.tools.list_ports`')
+            with serial.Serial(port, timeout=EBB.READ_TIMEOUT) as serialport:
+                ebb_info = check_serialport(serialport)
+                if ebb_info:
+                    yield port, ebb_info
+        except (OSError, serial.SerialException) as e:
+            pass
 
 
-    @staticmethod
-    def check_serialport(serialport, retries=4):
-        """Check if an open serial port is an actual EBB by queriying its version"""
-        for i in range(retries):
-            serialport.write(b'v\r')
-            response = serialport.readline()
-            if response and response.startswith(b'EBB'):
-                return True
-            logger.debug('failed to read EBB version, retrying')
-        return False
+def find_EBB_ports():
+    """Iterate over ports that look like they're an EBB"""
+    try:
+        import serial.tools.list_ports
+        for port, desc, hwid in serial.tools.list_ports.comports():
+            if desc.startswith("EiBotBoard") or "VID:PID=04D8:FD92" in hwid.upper():
+                yield port
+    except ImportError:
+        logger.error('could not import `serial.tools.list_ports`')
+
+
+
+EBBInfo = namedtuple('EBBInfo', 'hardware firmware nickname')
+
+
+def check_serialport(serialport, retries=4):
+    """Check if an open serial port is an actual EBB by queriying its version and nickname"""
+    for i in range(retries):
+        serialport.write(b'v\r')
+        response = serialport.readline()
+        if response and response.startswith(b'EBB'):
+            split = response.strip().split()
+            hardware, firmware = split[0], split[-1]
+
+            serialport.write(b'qt\r')
+            response2 = serialport.readline() + serialport.readline() #FIXME
+            if response2.endswith(b'\r\nOK\r\n'):
+                nickname = response2[:-6]
+            else:
+                nickname = None
+
+            return EBBInfo(hardware, firmware, nickname)
+        else:
+            logger.debug('failed to read EBB version, retrying...')
+

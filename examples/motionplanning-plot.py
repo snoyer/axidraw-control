@@ -6,6 +6,7 @@ import itertools
 
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.integrate
 
 from axidrawcontrol import motionplanning
 
@@ -28,14 +29,11 @@ def make_plot(xys, constraints, save_as=None):
         v_max, accel, decel, cornering_tolerance
     )
 
-    profile = list(motionplanning.velocity_profile(vectors, None, constraints))
-    ts,vs,ds = zip(*profile)
-
-    ts2,vs2,ds2 = zip(*motionplanning.interpolate_velocity_profile(profile, 0.025))
+    profile = list(motionplanning.velocity_profile(constraints, vectors))
+    ts,vs,ds = zip(*motionplanning.concat_blocks(profile))
 
 
 
-    # plt.style.use(os.path.abspath(os.path.join(os.path.dirname(__file__), 'style.mplrc')))
     fig1 = plt.figure(figsize=(16,6))
 
 
@@ -78,7 +76,10 @@ def make_plot(xys, constraints, save_as=None):
 
     _v, = ax2.plot(ts, vs, 'k', label='velocity')
     ax2b = ax2.twinx()
-    _d, = ax2b.plot(ts2, ds2, 'C3', label='distance')
+
+    ts2 = np.linspace(ts[0],ts[-1], 512)
+    vs2 = np.interp(ts2, ts, vs)
+    _d, = ax2b.plot(ts2, scipy.integrate.cumtrapz(vs2, x=ts2, initial=0), 'C3', label='distance')
 
 
     lvmin = np.minimum.reduce([vl0,vl1,vl2])
@@ -108,6 +109,7 @@ def read_trajectory(path):
         yield [float(x) for x in line.strip().split(' ')]
 
 xys = list(read_trajectory('trajectory1-small.txt'))
+# xys = list(read_trajectory('trajectory1.txt'))
 constraints = motionplanning.Constraints(250, 900, 900, 0.65)
 
-make_plot(xys, constraints, save_as='motionplanning.png')
+make_plot(xys, constraints, save_as='motionplanning-plot.png')
