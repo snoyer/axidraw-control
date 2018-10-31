@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <!-- <script src="https://code.jquery.com/pep/0.4.3/pep.js"></script> -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+  <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.12.1/jquery-ui.min.js"></script> -->
+  <!-- <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.12.1/jquery-ui.min.css"/> -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paper.js/0.11.5/paper-full.min.js"></script>
+  <!-- <script src="https://leaverou.github.io/multirange/multirange.js"></script> -->
+  <!-- <link rel="stylesheet" href="https://leaverou.github.io/multirange/multirange.css"/> -->
+  <link rel="stylesheet" href="index.css"/>
+  <title>axidraw</title>
+</head>
+<body >
+  <script type="text/javascript" src="index.js"></script>
+  <!-- <div id="slider1"></div> -->
+  <!-- <input type="range" multiple value="10,80" /> -->
+  <!-- <dl> -->
+    <div class="config">
+      <div class="speed-config">
+        <div>
+          <label for="speed">speed</label>
+          <input id="speed" type="range" min="0" max="100" value="50" />
+        </div>
+        <div>
+          <label for="accel">acceleration</label>
+          <input id="accel" type="range" min="0" max="100" value="50" />
+        </div>
+        <div>
+          <label for="accel">cornering</label>
+          <input id="cornering" type="range" min="0" max="100" value="50" />
+        </div>
+      </div>
+      <div class="pen-config">
+        <label for="penpos1">pen</label>
+        <div class="vrange"><input id="penpos1" class="penpos" type="range" min="0" max="100" value="75" step="5"/></div>
+        <div class="vrange"><input id="penpos2" class="penpos" type="range" min="0" max="100" value="25" step="5"/></div>
+        <div class="vrange"><input id="penpos3" class="penpos" type="range" min="0" max="100" value="25" step="5"/></div>
+      </div>
+    </div>
+    <div class="paper">
+      <canvas id="canvas" touch-action="none" data-paper-resize="true"></canvas>
+    </div>
+    
+  </body>
+</html>
