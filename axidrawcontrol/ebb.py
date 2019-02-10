@@ -8,18 +8,37 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class EBBSerialError(IOError):
+class SerialEbbError(IOError):
     pass
 
 
+class Ebb():
+    COMMANDS = [
+        'A','AC','BL','C','CN','CK','CU','CS','EM','ES','I','LM','MR','MW','ND','NI',
+        'O', 'PC','PD','PG','PI','PO','QB','QC','QL','QM','QN','QP','QR','QS','QT',
+        'RB','R','S2','SC','SE','SL','SM','SN','SP','SR','ST','T','TP','V','XM'
+    ]
+    def __init__(self):
+        def proxy(c):
+            def f(*args):
+                return self.run(c, *args)
+            return f
 
-class EBB(object):
+        for cmd in self.COMMANDS:
+            if not hasattr(self, cmd):
+                setattr(self, cmd, proxy(cmd))
+
+
+
+class SerialEbb(Ebb):
     ENCODING = 'ascii'
     READ_TIMEOUT = 0.025
     TOTAL_TMEOUT = 2
 
 
-    def __init__(self, port=None):
+    def __init__(self, port=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
         if not port:
             found_ports = list(find_EBB_ports())
             if found_ports:
@@ -27,7 +46,7 @@ class EBB(object):
                     logger.warn('found %d connected EBBs, using first one', len(found_ports))
                 port = min(found_ports)
             else:
-                raise EBBSerialError('could not find any connected EBB')
+                raise SerialEbbError('could not find any connected EBB')
 
         self.open(port)
 
@@ -40,15 +59,15 @@ class EBB(object):
             if not ebb_info:
                 self.serialport.close()
                 logger.warn('EBB check failed, closing serial port')
-                raise EBBSerialError('could not confirm EBB version on port %s' % port)
+                raise SerialEbbError('could not confirm EBB version on port %s' % port)
             else:
                 logger.info('confirmed EBB board %s on port `%s`', ebb_info, port)
                 self.serialport.reset_input_buffer()
         except OSError as e:
             if e.errno == 16:
-                raise EBBSerialError('port `%s` busy' % port)
+                raise SerialEbbError('port `%s` busy' % port)
             else:
-                raise EBBSerialError(e.strerror)
+                raise SerialEbbError(e.strerror)
 
 
     def reopen(self):
@@ -56,26 +75,20 @@ class EBB(object):
         self.open(self.serialport.port)
 
 
-    def run(self, *commands):
-        return bytearray().join(self.run_commands_iter(commands))
+    def run(self, *command):
+        cmd_bytes = self.parse_command(command)
 
+        logger.debug('-> %s', repr(cmd_bytes))
+        t0 = time.time()
 
-    def run_commands(self, commands):
-        return list(self.run_commands_iter(commands))
+        self.serialport.reset_input_buffer()
+        self.serialport.write(cmd_bytes)
+        response = self.read_response(cmd_bytes)
+        
+        t1 = time.time()
+        logger.debug('<- %s (%fs)', repr(response), t1-t0)
 
-
-    def run_commands_iter(self, commands):
-        for command in commands:
-            cmd_bytes = self.parse_command(command)
-
-            logger.debug('-> %s', repr(cmd_bytes))
-            t0 = time.time()
-            self.serialport.reset_input_buffer()
-            self.serialport.write(cmd_bytes)
-            response = self.read_response(cmd_bytes)
-            t1 = time.time()
-            logger.debug('<- %s (%fs)', repr(response), t1-t0)
-            yield response
+        return response
 
 
     def read_response(self, cmd):
@@ -107,7 +120,7 @@ class EBB(object):
             if ok(response):
                 return bytearray(response)
             if error(response):
-                raise EBBSerialError('%s %s' % (cmd, EBB.decode(response).strip()))
+                raise SerialEbbError('%s %s' % (cmd, self.decode(response).strip()))
 
         # we didn't exit early, some termination cases must be missing :/
         logger.warn('unexpected response: %s %s', cmd, response)
@@ -138,20 +151,20 @@ class EBB(object):
         return '<EBB on %s>' % self.port
 
 
-    @staticmethod
-    def parse_command(cmd):
+    @classmethod
+    def parse_command(cls, cmd):
         if isinstance(cmd, (bytes, bytearray)):
             # cmd is already bytes: just pass it along
             return cmd
         if isinstance(cmd, str):
             # cmd is a string: ensure it is '\r'-terminated and encode to bytes
-            return bytearray(cmd if cmd.endswith('\r') else cmd+'\r', EBB.ENCODING)
+            return bytearray(cmd if cmd.endswith('\r') else cmd+'\r', cls.ENCODING)
         if isinstance(cmd, tuple):
             # cmd is a tuple: convert each element, join with comma, encode to bytes
-            return bytearray(','.join(EBB.parse_tuple_command_iter(*cmd))+'\r', EBB.ENCODING)
+            return bytearray(','.join(cls.parse_tuple_command_iter(*cmd))+'\r', cls.ENCODING)
 
-    @staticmethod
-    def parse_tuple_command_iter(*values):
+    @classmethod
+    def parse_tuple_command_iter(cls, *values):
         for value in values:
             if isinstance(value, float):
                 yield str(int(round(value)))
@@ -159,16 +172,17 @@ class EBB(object):
                 yield str(value)
 
 
-    @staticmethod
-    def decode(bytes_str):
+    @classmethod
+    def decode(cls, bytes_str):
         """decode response bytes to a string"""
-        return bytes_str.decode(EBB.ENCODING)
+        return bytes_str.decode(cls.ENCODING)
+
 
 
 def find_EBBs():
     for port in find_EBB_ports():
         try:
-            with serial.Serial(port, timeout=EBB.READ_TIMEOUT) as serialport:
+            with serial.Serial(port, timeout=SerialEbb.READ_TIMEOUT) as serialport:
                 ebb_info = check_serialport(serialport)
                 if ebb_info:
                     yield port, ebb_info

@@ -1,2 +1,2 @@
-from .ebb import EBB, EBBSerialError
+from .ebb import Ebb, SerialEbb, SerialEbbError
 from .axidraw import Axidraw, Axidraw2

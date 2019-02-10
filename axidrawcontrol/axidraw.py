@@ -5,7 +5,7 @@ import logging
 
 import numpy as np
 
-from .ebb import EBB, EBBSerialError
+from .ebb import SerialEbb, SerialEbbError
 from . import motionplanning
 
 
@@ -33,14 +33,9 @@ SQRT2 = math.sqrt(2)
 
 
 class EbbMixin(object):
-    def __init__(self, port=None, EbbClass=EBB, *args, **kwargs):
+    def __init__(self, port=None, EbbClass=SerialEbb, *args, **kwargs):
         self.ebb = EbbClass(port=port)
         super().__init__(*args, **kwargs)
-
-
-    def ebb_run(self, *commands):
-        return self.ebb.run(*commands)
-
 
     def __enter__(self):
         #TODO file lock maybe?
@@ -59,7 +54,7 @@ class MotorsMixin(object):
     @property
     def microstepping(self):
         return self._microstepping
-    
+
     @microstepping.setter
     def microstepping(self, microstepping):
         possible_values = [16,8,4]  # 2x or full step doesn't seem to run smooth at all
@@ -116,7 +111,7 @@ class MotorsMixin(object):
             step_mode = 5-int(math.log2(self.microstepping))
         else:
             step_mode = 0
-        self.ebb_run(('EM', step_mode, step_mode))
+        self.ebb.EM(step_mode, step_mode)
 
     def disable_motors(self, disable=True):
         return self.enable_motors(not disable)
@@ -131,8 +126,8 @@ class MotorsMixin(object):
             l = abs(complex(di,dj)) # displacement norm
             li = abs(di/l) # normalized i component
             lj = abs(dj/l) # normalized j component
-            self.ebb_run(('LM', *self.LM_axis_params(di, v0*li, v1*li),
-                                *self.LM_axis_params(dj, v0*lj, v1*lj)))
+            self.ebb.LM(*self.LM_axis_params(di, v0*li, v1*li),
+                        *self.LM_axis_params(dj, v0*lj, v1*lj))
 
     @staticmethod
     def LM_axis_params(steps, vs0, vs1):
@@ -144,7 +139,7 @@ class MotorsMixin(object):
 
         duration = 2 * abs(steps) / (vs0+vs1)
         delta = round((rate1-rate0) / (duration*LM_FREQUENCY))
-        
+
         return rate0, steps, delta
 
 
@@ -162,10 +157,10 @@ class SimpleServoMixin(object):
     @property
     def pen_up_pos(self):
         return self._pen_up_pos
-    
+
     @pen_up_pos.setter
     def pen_up_pos(self, pen_up_pos):
-        self.ebb_run(('SC', 4, lerp(pen_up_pos, 0,1, SERVO_MIN,SERVO_MAX)))
+        self.ebb.SC(4, lerp(pen_up_pos, 0,1, SERVO_MIN,SERVO_MAX))
         self._pen_up_pos = pen_up_pos
 
 
@@ -175,27 +170,27 @@ class SimpleServoMixin(object):
 
     @pen_down_pos.setter
     def pen_down_pos(self, pen_down_pos):
-        self.ebb_run(('SC', 5, lerp(pen_down_pos, 0,1, SERVO_MIN,SERVO_MAX)))
+        self.ebb.SC(5, lerp(pen_down_pos, 0,1, SERVO_MIN,SERVO_MAX))
         self._pen_down_pos = pen_down_pos
 
 
     @property
     def pen_up_speed(self):
         return self._pen_up_speed
-    
+
     @pen_up_speed.setter
     def pen_up_speed(self, pen_up_speed):
-        self.ebb_run(('SC', 11, pen_up_speed * SERVO_SPEED_UNIT))
+        self.ebb.SC(11, pen_up_speed * SERVO_SPEED_UNIT)
         self._pen_up_speed = pen_up_speed
 
 
     @property
     def pen_down_speed(self):
         return self._pen_down_speed
-    
+
     @pen_down_speed.setter
     def pen_down_speed(self, pen_down_speed):
-        self.ebb_run(('SC', 12, pen_down_speed * SERVO_SPEED_UNIT))
+        self.ebb.SC(12, pen_down_speed * SERVO_SPEED_UNIT)
         self._pen_down_speed = pen_down_speed
 
 
@@ -215,7 +210,7 @@ class SimpleServoMixin(object):
 
         if delay == None:
             delay = self.safe_pen_up_delay
-        self.ebb_run(('SP', 1, delay*1000))
+        self.ebb.SP(1, delay*1000)
 
 
     def lower_pen(self, delay=None):
@@ -225,7 +220,7 @@ class SimpleServoMixin(object):
 
         if delay == None:
             delay = self.safe_pen_down_delay
-        self.ebb_run(('SP', 0, delay*1000))
+        self.ebb.SP(0, delay*1000)
         self.pen_is_up = False
 
 
@@ -243,14 +238,13 @@ class VariableServoMixin(object):
         new_pos = math.asin(clamp(height, 0, 1)*2-1)/math.pi+.5
 
         delta = abs(self.pen_current_pos - new_pos)
-        if delta < 0.01:
+        if delta < 0.005:
             return
-        
+
         if duration:
             speed = delta / duration
         elif speed:
             duration = delta / speed
-
         else:
             raise ValueError('must provide duration or speed')
 
@@ -258,11 +252,9 @@ class VariableServoMixin(object):
             delay = duration
 
         sp,sr,p = (4,11,1) if new_pos < self.pen_current_pos else (5,12,0)
-        self.ebb_run(
-            ('SC', sp, lerp(new_pos, 0,1, SERVO_MIN,SERVO_MAX)),
-            ('SC', sr, speed * SERVO_SPEED_UNIT),
-            ('SP', p, delay * 1000)
-        )
+        self.ebb.SC(sp, lerp(new_pos, 0,1, SERVO_MIN,SERVO_MAX))
+        self.ebb.SC(sr, speed * SERVO_SPEED_UNIT)
+        self.ebb.SP(p, delay * 1000)
         self.pen_current_pos = new_pos
 
 
@@ -300,7 +292,7 @@ class PenMixin(MotorsMixin, SimpleServoMixin):
             ts,vs,ds = zip(*profile)
             positions = np.interp(ds, np.hstack((0, np.cumsum(norms))),
                                       np.hstack((0, np.cumsum(vectors))))
-            
+
             speed_factor = self.steps_per_mm * SQRT2 # to convert speed in steps/s
             ei,ej = 0,0
             for (v0,p0),(v1,p1) in pairwise(zip(vs,positions)):
@@ -344,7 +336,7 @@ class BrushpenMixin(MotorsMixin, VariableServoMixin):
         xys = np.fromiter(map(make_complex, itertools.chain([self.current_position],xys)), np.complex128, l)
         vectors = np.ediff1d(xys)
 
-        self.move_by(vectors, speed_settings, zs)
+        self.move_by(vectors, speed_settings, ([None]+zs) if zs else [])
 
 
     def move_by(self, vectors, speed_settings, zs=None):
@@ -354,28 +346,26 @@ class BrushpenMixin(MotorsMixin, VariableServoMixin):
 
         constraints = self.motionplanning_constraints(speed_settings)
         blocks = list(motionplanning.velocity_profile(constraints, normed_vectors, norms))
-
         def zmoves():
             if zs and any(z!=None for z in zs):
-                block_ts = [block[0][0] if block else 0 for block in blocks]
+                block_ts = [0]+[block[-1][0] if block else 0 for block in blocks]
                 for (i0,z0),(i1,z1) in pairwise((i,z) for i,z in enumerate(zs) if z!=None or i==0):
                     yield z1, block_ts[i1]-block_ts[i0]
                     for k in range(i1-i0-1):
                         yield None
-                yield None
             else:
                 yield from itertools.repeat(None, len(vectors))
 
         ei,ej = 0,0 # step rounding errors
         speed_factor = self.steps_per_mm * SQRT2 # to convert speed in steps/s
-            
+
         norms_cumsum = np.hstack((0, np.cumsum(norms)))
         vectors_cumsum = np.hstack((0, np.cumsum(vectors)))
 
         for block,zmove in zip(blocks, zmoves()):
             if zmove:
                 z,dt = zmove
-                self.move_pen(z, dt, 0)
+                self.move_pen(z, duration=dt, delay=0)
 
             if block:
                 ts,vs,ds = zip(*block)
@@ -405,7 +395,7 @@ class Axidraw2(EbbMixin, BrushpenMixin):
 
 
 def make_complex(xy):
-    return xy if isinstance(xy, complex) else complex(*xy)
+    return xy if isinstance(xy, complex) else complex(*xy[:2])
 
 
 def roundf(x):
