@@ -1,12 +1,15 @@
 from collections import namedtuple
 import math
-import itertools
+from itertools import chain, takewhile
 import logging
 
 import numpy as np
+import rdp
 
-from .ebb import SerialEbb, SerialEbbError
+from .ebb import LM_command, SC_commands, enable_motors_command, disable_motors_command
 from . import motionplanning
+from .util.svg import path_to_polylines as svg_path_to_polylines
+from .util.misc import pairwise, lerp, clamp, lerp_clamp, croundf, uniq
 
 
 logger = logging.getLogger(__name__)
@@ -14,63 +17,141 @@ logger = logging.getLogger(__name__)
 
 
 '''Hardware-related constants'''
-SERVO_MIN =  7500    # lowest pen position in servo units
-SERVO_MAX = 28000    # highest pen position in servo units
 MIN_MOTOR_RATE =     4    # minimum motor rate in Hz (steps/s)
 MAX_MOTOR_RATE = 25000    # maximum motor rate in Hz (steps/s)
 STEPS_PER_MM_AT_1X = 5    # number of motor units (steps) per millimiter without microstepping
-LM_FREQUENCY = 25000    # low-level move motor frequency in Hz
-
-LM_RATE_FACTOR = (2**31)/LM_FREQUENCY    # low-level rate factor
-SERVO_SPEED_UNIT = (SERVO_MAX - SERVO_MIN) * 24 / 1000
 
 MIN_ACCELERATION =   5    # mm/s/s
-MAX_ACCELERATIONS = {4: 1000, 8: 4000, 16: 8000}    # microstepping -> mm/s/s
-SAFE_ACCELERATIONS = {4: 1000, 8: 1200, 16: 1200}    # microstepping -> mm/s/s
+MAX_ACCELERATIONS = {4: 1000, 8: 2000, 16: 4000}    # microstepping -> mm/s/s
+MIN_CORNERING = 0.0001
+MAX_CORNERING = 0.01
+
+MIN_PEN_SPEED = .2 #TODO find actual values
+MAX_PEN_SPEED = 1.5  #TODO find actual values
+
+MIN_TIMESTEP      = 0.005
+PREFERED_TIMESTEP = 0.025
 
 SQRT2 = math.sqrt(2)
 
 
+_MotionSettings = namedtuple('MotionSettings', '''
+velocity_up,
+acceleration_up,
+deceleration_up,
+cornering_up,
 
-class EbbMixin(object):
-    def __init__(self, port=None, EbbClass=SerialEbb, *args, **kwargs):
-        self.ebb = EbbClass(port=port)
-        super().__init__(*args, **kwargs)
+velocity_down,
+acceleration_down,
+deceleration_down,
+cornering_down,
 
-    def __enter__(self):
-        #TODO file lock maybe?
-        return self
+height_up,
+height_down,
+height_pressure,
 
-    def __exit__(self, type, value, traceback):
-        self.ebb.close()
+lowering_speed,
+raising_speed,
+''')
+
+
+def MotionSettings(**kwargs):
+    def find(*args, default=None):
+        for arg in args:
+            v = kwargs.get(arg)
+            if v != None:
+                return v
+        return default
+
+
+    velocity_down = find('velocity_down', 'velocity', default=.5)
+    acceleration_down = find('acceleration_down', 'acceleration', default=.5)
+    deceleration_down = find('deceleration_down', default=acceleration_down)
+    cornering_down = find('cornering_down', 'cornering', default=.5)
+
+    velocity_up = find('velocity_up', default=velocity_down)
+    acceleration_up = find('acceleration_up', default=acceleration_down)
+    deceleration_up = find('deceleration_up', default=deceleration_down)
+    cornering_up = find('cornering_up', default=cornering_down)
+
+    height_up =  find('height_up', 'pen_up', default=1)
+    height_down = find('height_down', 'pen_down', default=0)
+    height_pressure = find('height_pressure', default=height_down)
+
+    lowering_speed = find('lowering_speed', 'pen_speed', default=1)
+    raising_speed = find('raising_speed', default=lowering_speed)
+
+    return _MotionSettings(
+        velocity_up, acceleration_up, deceleration_up, cornering_up,
+        velocity_down, acceleration_down, deceleration_down, cornering_down,
+        height_up, height_down, height_pressure,
+        lowering_speed, raising_speed,
+    )
+
+DEFAULT_SETTINGS = MotionSettings()
+
+def settings_constraints_up(settings):
+    return (
+        settings.velocity_up, 
+        settings.acceleration_up, settings.deceleration_up, 
+        settings.cornering_up
+    )
+
+def settings_constraints_down(settings):
+    return (
+        settings.velocity_down, 
+        settings.acceleration_down, settings.deceleration_down, 
+        settings.cornering_down
+    )
 
 
 
-class MotorsMixin(object):
-    def __init__(self, microstepping=16, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.microstepping = microstepping
+def raise_pen(*args, **kwargs):
+    return lambda s: CommandsBuilder(s).raise_pen(*args, **kwargs)
 
-    @property
-    def microstepping(self):
-        return self._microstepping
+def lower_pen(*args, **kwargs):
+    return lambda s: CommandsBuilder(s).lower_pen(*args, **kwargs)
 
-    @microstepping.setter
-    def microstepping(self, microstepping):
-        possible_values = [16,8,4]  # 2x or full step doesn't seem to run smooth at all
-        if not microstepping in possible_values:
-            raise ValueError('microstepping must be in %s' % possible_values)
-        self._microstepping = microstepping
+def walk_path(*args, **kwargs):
+    return lambda s: CommandsBuilder(s).walk_path(*args, **kwargs)
 
-        # update microstepping on EBB
-        self.enable_motors()
-        self.disable_motors()
+def draw_path(*args, **kwargs):
+    return lambda s: CommandsBuilder(s).draw_path(*args, **kwargs)
 
+def brush_path(*args, **kwargs):
+    return lambda s: CommandsBuilder(s).brush_path(*args, **kwargs)
+
+
+
+def pen_height_to_angle(h):
+    h = clamp(h, 0,1)
+    return math.asin(h*2-1)/math.pi + .5
+
+def angle_to_pen_height(a):
+    a = clamp(a, 0,1)
+    return (math.sin(a*math.pi-math.pi/2)+1)/2
+
+
+
+class CommandsBuilder(object):
+    def __init__(self, initial_state=None):
+        if initial_state:
+            self.microstepping = initial_state.microstepping
+            self.pen_height = initial_state.pen_height
+            self.pen_down = initial_state.pen_down
+            self.pen_position = initial_state.pen_position
+        else:
+            self.microstepping = 16
+            self.pen_height = 1
+            self.pen_down = False
+            self.pen_position = 0j
+
+        self.steps_err = 0j
 
     @property
     def steps_per_mm(self):
         return STEPS_PER_MM_AT_1X * self.microstepping
-
+    
 
     def project(self, xy):
         x,y = xy.real, xy.imag
@@ -84,343 +165,207 @@ class MotorsMixin(object):
 
 
     @property
-    def min_speed(self):
+    def min_velocity(self):
         return MIN_MOTOR_RATE / self.steps_per_mm / SQRT2    # mm/s
 
     @property
-    def max_speed(self):
+    def max_velocity(self):
         return MAX_MOTOR_RATE / self.steps_per_mm / SQRT2    # mm/s
 
+    @property
+    def min_acceleration(self):
+        return MIN_ACCELERATION    # mm/s/s
+    
+    @property
+    def max_acceleration(self):
+        return MAX_ACCELERATIONS[self.microstepping]    # mm/s/s
 
-    def motionplanning_constraints(self, speed_settings):
-        speed_t, accel_t, cornering_t = speed_settings
 
-        v_max = lerp_clamp(speed_t, 0,1, self.min_speed, self.max_speed)
-        accel = clamp(lerp(accel_t, 0,1, MIN_ACCELERATION, SAFE_ACCELERATIONS[self.microstepping]),
-                      MIN_ACCELERATION, MAX_ACCELERATIONS[self.microstepping])
-        cornering = lerp_clamp(cornering_t, 0,1, 0, 1) #TODO figure out correct bounds
+    def motionplanning_constraints(self, velocity, accel, decel, cornering):
+        v_max = lerp_clamp(velocity, 0,1, self.min_velocity, self.max_velocity)
+        accel = lerp_clamp(accel, 0,1, self.min_acceleration, self.max_acceleration)
+        decel = lerp_clamp(decel, 0,1, self.min_acceleration, self.max_acceleration)
+        cornering = lerp_clamp(cornering, 0,1, MIN_CORNERING, MAX_CORNERING)
         return motionplanning.Constraints(
             v_max = v_max,
-            accel = accel, decel = accel,
+            accel = accel, decel = decel,
             cornering_tolerance = cornering
         )
 
 
-    def enable_motors(self, enable=True):
-        if enable:
-            step_mode = 5-int(math.log2(self.microstepping))
-        else:
-            step_mode = 0
-        self.ebb.EM(step_mode, step_mode)
+    def enable_motors(self):
+        yield enable_motors_command(self.microstepping)
 
-    def disable_motors(self, disable=True):
-        return self.enable_motors(not disable)
+    def disable_motors(self):
+        yield disable_motors_command()
 
-    def wait_until_stopped(self):
-        while self.ebb.run('QM') != b'QM,0,0,0,0\n\r':
-            pass
 
 
-    def LM_move(self, di,dj, v0, v1):
-        if di or dj:
-            l = abs(complex(di,dj)) # displacement norm
-            li = abs(di/l) # normalized i component
-            lj = abs(dj/l) # normalized j component
-            self.ebb.LM(*self.LM_axis_params(di, v0*li, v1*li),
-                        *self.LM_axis_params(dj, v0*lj, v1*lj))
+    def raise_pen(self, height, duration=None, speed=None, delay=None):
+        return self._move_pen(height, False, duration=duration, speed=speed, delay=delay)
 
-    @staticmethod
-    def LM_axis_params(steps, vs0, vs1):
-        if steps == 0:
-            return 0,0,0
+    def lower_pen(self, height, duration=None, speed=None, delay=None):
+        return self._move_pen(height, True, duration=duration, speed=speed, delay=delay)
 
-        rate0 = round(LM_RATE_FACTOR * vs0)
-        rate1 = round(LM_RATE_FACTOR * vs1)
+    def _move_pen(self, height, pen_down, duration=None, speed=None, delay=None):
+        delta = abs(height - self.pen_height)
 
-        duration = 2 * abs(steps) / (vs0+vs1)
-        delta = round((rate1-rate0) / (duration*LM_FREQUENCY))
-
-        return rate0, steps, delta
-
-
-
-class SimpleServoMixin(object):
-    def __init__(self, pen_up_pos=1, pen_down_pos=0, pen_up_speed = 2, pen_down_speed = 2, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.pen_up_pos = pen_up_pos
-        self.pen_down_pos = pen_down_pos
-        self.pen_up_speed = pen_up_speed
-        self.pen_down_speed = pen_down_speed
-        self.pen_is_up = None
-
-
-    @property
-    def pen_up_pos(self):
-        return self._pen_up_pos
-
-    @pen_up_pos.setter
-    def pen_up_pos(self, pen_up_pos):
-        self.ebb.SC(4, lerp(pen_up_pos, 0,1, SERVO_MIN,SERVO_MAX))
-        self._pen_up_pos = pen_up_pos
-
-
-    @property
-    def pen_down_pos(self):
-        return self._pen_down_pos
-
-    @pen_down_pos.setter
-    def pen_down_pos(self, pen_down_pos):
-        self.ebb.SC(5, lerp(pen_down_pos, 0,1, SERVO_MIN,SERVO_MAX))
-        self._pen_down_pos = pen_down_pos
-
-
-    @property
-    def pen_up_speed(self):
-        return self._pen_up_speed
-
-    @pen_up_speed.setter
-    def pen_up_speed(self, pen_up_speed):
-        self.ebb.SC(11, pen_up_speed * SERVO_SPEED_UNIT)
-        self._pen_up_speed = pen_up_speed
-
-
-    @property
-    def pen_down_speed(self):
-        return self._pen_down_speed
-
-    @pen_down_speed.setter
-    def pen_down_speed(self, pen_down_speed):
-        self.ebb.SC(12, pen_down_speed * SERVO_SPEED_UNIT)
-        self._pen_down_speed = pen_down_speed
-
-
-    @property
-    def safe_pen_down_delay(self):
-        return abs(self.pen_up_pos - self.pen_down_pos) / self.pen_down_speed
-
-    @property
-    def safe_pen_up_delay(self):
-        return abs(self.pen_up_pos - self.pen_down_pos) / self.pen_up_speed
-
-
-    def raise_pen(self, delay=None):
-        if self.pen_is_up:
-            return
-        self.pen_is_up = True
-
-        if delay == None:
-            delay = self.safe_pen_up_delay
-        self.ebb.SP(1, delay*1000)
-
-
-    def lower_pen(self, delay=None):
-        if not self.pen_is_up:
-            return
-        self.pen_is_up = False
-
-        if delay == None:
-            delay = self.safe_pen_down_delay
-        self.ebb.SP(0, delay*1000)
-        self.pen_is_up = False
-
-
-
-class VariableServoMixin(object):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # self.pen_up_pos = None
-        # self.pen_down_pos = None
-        self.pen_current_pos = 1
-
-
-    def move_pen(self, height, duration=None, delay=None, speed=2):
-        # do some trig to get linear movement from axial servo
-        new_pos = math.asin(clamp(height, 0, 1)*2-1)/math.pi+.5
-
-        delta = abs(self.pen_current_pos - new_pos)
-        if delta < 0.005:
-            return
-
-        if duration:
-            speed = delta / duration
-        elif speed:
-            duration = delta / speed
-        else:
-            raise ValueError('must provide duration or speed')
-
-        if delay == None:
-            delay = duration
-
-        sp,sr,p = (4,11,1) if new_pos < self.pen_current_pos else (5,12,0)
-        self.ebb.SC(sp, lerp(new_pos, 0,1, SERVO_MIN,SERVO_MAX))
-        self.ebb.SC(sr, speed * SERVO_SPEED_UNIT)
-        self.ebb.SP(p, delay * 1000)
-        self.pen_current_pos = new_pos
-
-
-
-class PenMixin(MotorsMixin, SimpleServoMixin):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.current_position = 0j
-
-
-    def draw(self, xys, speed_settings):
-        self.move_to(xys[:1], speed_settings)
-        self.lower_pen()
-        self.move_to(xys[1:], speed_settings)
-        self.raise_pen()
-
-
-    def move_to(self, xys, speed_settings):
-        l = (len(xys)+1) if hasattr(xys, '__len__') else -1
-
-        xys = np.fromiter(map(make_complex, itertools.chain([self.current_position],xys)), np.complex128, l)
-        vectors = np.ediff1d(xys)
-
-        self.move_by(vectors, speed_settings)
-
-
-    def move_by(self, vectors, speed_settings):
-
-        norms = np.abs(vectors)
-        normed_vectors = vectors/norms
-
-        constraints = self.motionplanning_constraints(speed_settings)
-        profile = list(motionplanning.concat_blocks(motionplanning.velocity_profile(constraints, normed_vectors, norms)))
-        if profile:
-            ts,vs,ds = zip(*profile)
-            positions = np.interp(ds, np.hstack((0, np.cumsum(norms))),
-                                      np.hstack((0, np.cumsum(vectors))))
-
-            speed_factor = self.steps_per_mm * SQRT2 # to convert speed in steps/s
-            ei,ej = 0,0
-            for (v0,p0),(v1,p1) in pairwise(zip(vs,positions)):
-                ij = self.project(p1)-self.project(p0) # displacement in steps
-                ei,di = roundf(ij.real+ei) # round i component
-                ej,dj = roundf(ij.imag+ej) # round j component
-
-                self.LM_move(di, dj, v0*speed_factor, v1*speed_factor)
-                self.current_position += self.unproject(complex(di,dj))
-
-
-
-class BrushpenMixin(MotorsMixin, VariableServoMixin):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.current_position = 0j
-
-
-    def draw(self, xyzs, speed_settings):
-        xys =[]
-        zs = []
-        for xyz in xyzs:
-            xys.append(xyz[:2])
-            zs.append(xyz[2] if len(xyz)>2 else None)
-
-        pen_pos = self.pen_current_pos
-
-        #TODO improve initial move
-        # should be able to move short of the first point and have a smooth transifition from initial pen position to first point
-        self.move_to(xys[:1], speed_settings)
-        if zs[0]:
-            self.move_pen(zs[0], .2)
-
-        self.move_to(xys[1:], speed_settings, zs[1:])
-        self.move_pen(pen_pos, .2)
-
-
-    def move_to(self, xys, speed_settings, zs=None):
-        l = (len(xys)+1) if hasattr(xys, '__len__') else -1
-
-        xys = np.fromiter(map(make_complex, itertools.chain([self.current_position],xys)), np.complex128, l)
-        vectors = np.ediff1d(xys)
-
-        self.move_by(vectors, speed_settings, ([None]+zs) if zs else [])
-
-
-    def move_by(self, vectors, speed_settings, zs=None):
-
-        norms = np.abs(vectors)
-        normed_vectors = vectors/norms
-
-        constraints = self.motionplanning_constraints(speed_settings)
-        blocks = list(motionplanning.velocity_profile(constraints, normed_vectors, norms))
-        def zmoves():
-            if zs and any(z!=None for z in zs):
-                block_ts = [0]+[block[-1][0] if block else 0 for block in blocks]
-                for (i0,z0),(i1,z1) in pairwise((i,z) for i,z in enumerate(zs) if z!=None or i==0):
-                    yield z1, block_ts[i1]-block_ts[i0]
-                    for k in range(i1-i0-1):
-                        yield None
+        if delta > 1e-4:
+            if speed:
+                duration = delta / speed
+            elif duration:
+                speed = delta / duration
             else:
-                yield from itertools.repeat(None, len(vectors))
+                raise ValueError('must provide duration or speed')
+            
+            if delay == None:
+                delay = duration
 
-        ei,ej = 0,0 # step rounding errors
+            yield from SC_commands(pen_down, height, speed)
+            yield ('SP', 0 if pen_down else 1, delay*1000)
+
+            self.pen_height = height
+            self.pen_down = pen_down
+        else:
+            if delay:
+                yield 'SM',0,0,delay
+
+
+
+    def walk_path(self, path, settings=DEFAULT_SETTINGS):
+        constraints = self.motionplanning_constraints(*settings_constraints_up(settings))
+
+        plines = path_to_polylines(path, start=self.pen_position)
+
+        yield from self.enable_motors()
+
+        for pline in plines:
+            plan = plan_trajectory(chain([self.pen_position], pline), constraints)
+            yield from self._do_planned_trajectory(plan)
+
+
+    def draw_path(self, path, settings=DEFAULT_SETTINGS):
+        constraints_up = self.motionplanning_constraints(*settings_constraints_up(settings))
+        constraints_down = self.motionplanning_constraints(*settings_constraints_down(settings))
+        lowering_speed = lerp_clamp(settings.lowering_speed, 0,1, MIN_PEN_SPEED, MAX_PEN_SPEED)
+        raising_speed = lerp_clamp(settings.raising_speed, 0,1, MIN_PEN_SPEED, MAX_PEN_SPEED)
+ 
+        plines = path_to_polylines(path, start=self.pen_position)
+
+        yield from self.enable_motors()
+
+        for pline in plines:
+            yield from self.raise_pen(settings.height_up, speed=raising_speed)
+            plan_up = plan_trajectory([self.pen_position, pline[0]], constraints_up)
+            yield from self._do_planned_trajectory(plan_up)
+
+            if len(pline)>1:
+                yield from self.lower_pen(settings.height_down, speed=lowering_speed)
+                plan_down = plan_trajectory(pline, constraints_down)
+                yield from self._do_planned_trajectory(plan_down)
+                yield from self.raise_pen(settings.height_up, speed=raising_speed)
+
+
+    def brush_path(self, path, pressure, settings=DEFAULT_SETTINGS):
+        constraints_up = self.motionplanning_constraints(*settings_constraints_up(settings))
+        constraints_down = self.motionplanning_constraints(*settings_constraints_down(settings))
+        lowering_speed = lerp_clamp(settings.lowering_speed, 0,1, MIN_PEN_SPEED, MAX_PEN_SPEED)
+        raising_speed = lerp_clamp(settings.raising_speed, 0,1, MIN_PEN_SPEED, MAX_PEN_SPEED)
+        
+        plines = list(path_to_polylines(path, start=self.pen_position))
+        pline_lens = [np.sum(np.abs(np.ediff1d(pline))) for pline in plines]
+        total_len = sum(pline_lens)
+
+        yield from self.enable_motors()
+
+        start_len = 0
+        for pline,pline_len in zip(plines, pline_lens):
+            rel_start_len = start_len / total_len
+            rel_pline_len = pline_len / total_len
+            sub_pressure = [((l-rel_start_len)*total_len, lerp(p, 0,1, settings.height_down, settings.height_pressure)) for l,p in pressure]
+            start_len += pline_len
+
+            plan_up = plan_trajectory([self.pen_position, pline[0]], constraints_up)
+            plan_down = plan_trajectory(pline, constraints_down, sub_pressure)
+            
+            yield from self._do_planned_trajectory(plan_up)
+            if plan_down.z0 == None:
+                yield from self.lower_pen(settings.height_down, speed=lowering_speed)
+
+            yield from self._do_planned_trajectory(plan_down)
+            yield from self.raise_pen(settings.height_up, speed=raising_speed)
+
+
+    def _do_planned_trajectory(self, plan):
+        z_moves = plan.z_moves if plan.z_moves else {}
+
         speed_factor = self.steps_per_mm * SQRT2 # to convert speed in steps/s
 
-        norms_cumsum = np.hstack((0, np.cumsum(norms)))
-        vectors_cumsum = np.hstack((0, np.cumsum(vectors)))
+        if plan.z0 != None:
+            yield from self.lower_pen(plan.z0, speed=2)
 
-        for block,zmove in zip(blocks, zmoves()):
-            if zmove:
-                z,dt = zmove
-                self.move_pen(z, duration=dt, delay=0)
+        for i,((t0,v0,xy0),(t1,v1,xy1)) in enumerate(pairwise(plan.xy_targets)):
+            z_move = z_moves.get(i)
+            if z_move:
+                z,dt = z_move
+                yield from self.lower_pen(z, duration=dt, delay=0)
 
-            if block:
-                ts,vs,ds = zip(*block)
-                xys = np.interp(ds, norms_cumsum, vectors_cumsum)
-
-                for (t0,v0,xy0),(t1,v1,xy1) in pairwise(zip(ts,vs,xys)):
-                    ij = self.project(xy1)-self.project(xy0) # displacement in steps
-                    ei,di = roundf(ij.real+ei) # round i component
-                    ej,dj = roundf(ij.imag+ej) # round j component
-
-                    self.LM_move(di, dj, v0*speed_factor, v1*speed_factor)
-                    self.current_position += self.unproject(complex(di,dj))
+            if v0 or v1:
+                delta = self.project(xy1) - self.project(xy0) # displacement in steps
+                self.steps_err,delta = croundf(delta + self.steps_err)
+                di,dj = delta.real, delta.imag
+                if di or dj:
+                    yield LM_command(di, dj, v0*speed_factor, v1*speed_factor)
+                    self.pen_position += self.unproject(complex(di,dj))
 
 
 
 
-class Axidraw(EbbMixin, PenMixin):
-    pass
+PlannedTrajectory = namedtuple('PlannedTrajectory', 'xy_targets z0 z_moves')
+
+def plan_trajectory(pline, constraints, pressure=None):
+
+    xys = np.fromiter(uniq(pline), np.complex128)
+    if len(xys)<2:
+        return PlannedTrajectory([], None, {})
+
+    vectors = np.ediff1d(xys)
+    norms = np.abs(vectors)
+    norms_cumsum = np.hstack([0, np.cumsum(norms)])
+
+    profile = list(motionplanning.velocity_profile(constraints, vectors/norms, norms))
+    
+    if not profile:
+        return PlannedTrajectory([], None, {})
+    
+    prefered_timestep = MIN_TIMESTEP if pressure else PREFERED_TIMESTEP
+    profile = list(motionplanning.resample_profile(profile, MIN_TIMESTEP, prefered_timestep))
+    
+    ts,vs,ds = zip(*profile)
+    xys = np.interp(ds, norms_cumsum, xys)
+    
+    if pressure:
+        pressure_ds,pressure_zs = zip(*pressure)
+
+        zs = np.interp(ds, pressure_ds, pressure_zs)
+        z0 = zs[0]
+
+        mask = rdp.rdp(np.array([ds,zs]).T, algo='iter', return_mask=True, epsilon=0.001)
+        z_dts = np.ediff1d(np.array(ts)[mask])
+        z_zs = np.array(zs)[mask]
+        z_dzs = np.ediff1d(z_zs)
+        z_moves = {i:(z_zs[j+1], z_dts[j]) for j,i in enumerate(np.where(mask)[0][:-1]) if z_dzs[j]}
+    else:
+        z0 = None
+        z_moves = {}
+
+    return PlannedTrajectory(list(zip(ts,vs,xys)), z0, z_moves)
 
 
 
-
-class Axidraw2(EbbMixin, BrushpenMixin):
-    pass
-
-
-
-
-def make_complex(xy):
-    return xy if isinstance(xy, complex) else complex(*xy[:2])
-
-
-def roundf(x):
-    xi = round(x)
-    return x - xi, xi
-
-
-def clamp(x, low, high):
-    return low  if x < low  \
-      else high if x > high \
-      else x
-
-
-def lerp(t, t0, t1, v0, v1):
-    tv = (t - t0) / (t1 - t0)
-    return v0 + (v1 - v0) * tv
-
-
-def lerp_clamp(t, t0, t1, v0, v1):
-    return clamp(lerp(t, t0,t1, v0,v1), v0,v1)
-
-
-
-def pairwise(iterable):
-    "s -> (s0,s1), (s1,s2), (s2, s3), ..."
-    a, b = itertools.tee(iterable)
-    next(b, None)
-    return zip(a, b)
+def path_to_polylines(path, start=0j):
+    if isinstance(path, list):
+        line = [p if isinstance(p, complex) else complex(*p[:2]) for p in path]
+        return [line]
+    else:
+        return svg_path_to_polylines(path, start=start)

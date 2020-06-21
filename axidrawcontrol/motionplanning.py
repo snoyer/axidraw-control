@@ -1,14 +1,19 @@
 from math import sqrt
 from collections import namedtuple
-import itertools
+from itertools import chain, islice
+import bisect
 import logging
 import numpy as np
 
+from .util.misc import pairwise
 
 logger = logging.getLogger(__name__)
 
 
 Constraints = namedtuple('Constraints', 'v_max accel decel cornering_tolerance')
+
+Waypoint = namedtuple('Waypoint', 't v d')
+
 
 
 def velocity_profile(constraints, vectors, norms=None):
@@ -18,7 +23,7 @@ def velocity_profile(constraints, vectors, norms=None):
     :param vectors: numpy array of displacement vectors
     :param norms: numpy array of displacement distances if `vectors` are unit vectors
 
-    :return: list of (time, velocity, distance) tuples
+    :return: list of Waypoint namedtuples (`(time, velocity, distance)`)
     """
     if isinstance(norms, np.ndarray):
         unit_vectors = vectors
@@ -27,11 +32,10 @@ def velocity_profile(constraints, vectors, norms=None):
         vector_norms = np.abs(vectors)
         unit_vectors = vectors/vector_norms
 
-    return _velocity_profile(
+    return flatten_blocks(_velocity_profile(
         unit_vectors, vector_norms,
-        constraints.v_max, constraints.accel, constraints.decel,
-        constraints.cornering_tolerance,
-    )
+        constraints.v_max, constraints.accel, constraints.decel, constraints.cornering_tolerance
+    ))
 
 
 
@@ -47,14 +51,12 @@ def _velocity_profile(unit_vectors, vector_norms, v_max, accel, decel, cornering
     ds = np.hstack((0, np.cumsum(vector_norms)))
     vs = np.minimum.reduce(limits)
 
-    t0 = v0 = 0
+    t0,v0,d0 = 0,0,0
     for (d1,v1),(d2,v2) in pairwise(zip(ds,vs)):
-        tvds = base_velocity_profile(d2-d1, min(v1,v0), v2, v_max, accel, decel)
-        if tvds:
-            yield [(t0+t, v, d1+d) for t,v,d in tvds]
-            t,v,_ = tvds[-1]
-            t0 += t
-            v0 = v
+        block = [Waypoint(t+t0,v,d+d0) for t,v,d in base_velocity_profile(d2-d1, min(v1,v0), v2, v_max, accel, decel)]
+        if block:
+            yield block
+            t0,v0,d0 = block[-1]
         else:
             yield []
 
@@ -93,7 +95,7 @@ def compute_velocity_limits(unit_vectors, vector_norms, v_max, accel, decel, cor
 def acceleration_max_velocities(norms, target_vs, accel, v0=0):
     """Compute reachable final velocities while conforming to given acceleration rate."""
     yield v0
-    for d,target in zip(norms, target_vs[1:]):
+    for d,target in zip(norms, islice(target_vs,1,None)):
         v = min(target, sqrt(2*accel*d + v0**2))
         yield v
         v0 = v
@@ -102,7 +104,7 @@ def acceleration_max_velocities(norms, target_vs, accel, v0=0):
 def deceleration_max_velocities(norms, target_vs, decel, v0=0):
     """Compute requiried initial velocities to conform to given deceleration rate."""
     return reversed(list(acceleration_max_velocities(
-        norms[::-1], target_vs[::-1],
+        reversed(norms), reversed(target_vs),
         decel, v0
     )))
 
@@ -119,7 +121,7 @@ def cornering_max_velocities(unit_vectors, max_accel, tolerance, epsilon=1e-8, i
         dot = u.real*v.real + u.imag*v.imag
         cos_angle = -dot
         sq_sin_half_angle = (1-cos_angle)/2
-        sin_half_angle = sqrt(sq_sin_half_angle) if sq_sin_half_angle >= 0 else 0
+        sin_half_angle = sqrt(sq_sin_half_angle) if sq_sin_half_angle > 0 else 0
         if 1-sin_half_angle > epsilon: # avoid division by zero
             r = tolerance * sin_half_angle / (1-sin_half_angle)
             yield sqrt(max_accel * r)
@@ -130,7 +132,7 @@ def cornering_max_velocities(unit_vectors, max_accel, tolerance, epsilon=1e-8, i
 
 
 
-def base_velocity_profile(d, v0, v1, v_max, accel, decel, t_epsilon =1e-8):
+def base_velocity_profile(d, v0, v1, v_max, accel, decel, t_epsilon=1e-8):
     """Compute a constant acceleration velocity profile for a single move over distance `d`.
 
     :param d: total distance to cover (unit d)
@@ -228,6 +230,8 @@ def base_velocity_profile(d, v0, v1, v_max, accel, decel, t_epsilon =1e-8):
     a = accel if v0 <= v1 else -decel
     t = (sqrt(abs(v0**2 + 2*a*d)) - v0) / a
     v_end = v0 + a * t
+    if v_end < 0:
+        v_end=0
 
     if abs(v_end - v1) < 1e-12:
         logger.debug('linear, t=%s', t)
@@ -241,14 +245,75 @@ def base_velocity_profile(d, v0, v1, v_max, accel, decel, t_epsilon =1e-8):
 
 
 
-def concat_blocks(profile):
-    for i,tvds in enumerate(profile):
-        yield from tvds[0 if i==0 else 1:]
+def resample_profile(profile, min_timestep, target_timestep=None):
+    """resample a velocity profile to garantee a minimum duration between waypoints."""
+
+    ts,vs,ds = zip(*profile)
+
+    def to_remove(i, epsilon=1e-3):
+        should = ts[i] - ts[i-1] < min_timestep \
+              or ts[i+1] - ts[i] < min_timestep
+        can = vs[i-1] >= epsilon or vs[i+1] >= epsilon
+        return should and can
+
+    def priority(i):
+        v0,v,v1 = vs[i-1:i+2]
+        if v0 >= v < v1 or v0 > v <= v1:
+            return 0, v
+        elif v0 <= v > v1 or v0 < v >= v1:
+            return 1,-v
+        else:
+            return 2,-v
+
+    def candidates():
+        indices = range(1,len(ts)-1)
+        return sorted(filter(to_remove, indices), key=priority)
+
+
+    q = candidates()
+    if q:
+        ts,vs,ds = map(list, (ts,vs,ds))
+        while q:
+            while q:
+                i = q.pop()
+                if to_remove(i):
+                    ts.pop(i)
+                    vs.pop(i)
+                    ds.pop(i)
+                    q = [(j-1 if j>i else j) for j in q]
+            q = candidates()
+
+        vs = np.array(vs)
+        ds = np.array(ds)
+        ts = np.cumsum(np.hstack([0, np.ediff1d(ds)/((vs[:-1]+vs[1:])/2)]))
 
 
 
-def pairwise(iterable):
-    """s -> (s0,s1), (s1,s2), (s2, s3), ..."""
-    a, b = itertools.tee(iterable)
-    next(b, None)
-    return zip(a, b)
+    if target_timestep:
+        def new_ts():
+            yield ts[0]
+            for t0,t1 in pairwise(ts):
+                dt = t1 - t0
+                if dt > 0:
+                    if dt >= 2*target_timestep:
+                        off = (dt%target_timestep) / 2
+                        yield from t0 + np.arange(target_timestep+off, dt-target_timestep, target_timestep)
+                    yield t1
+
+        new_ts = np.fromiter(new_ts(), np.float64)
+        vs = np.interp(new_ts, ts, vs)
+        ds = ds[0] + np.hstack([0, np.cumsum(np.ediff1d(new_ts) * (vs[:-1]+vs[1:])/2)])
+        ts = new_ts
+
+    return [Waypoint(t,v,d) for t,v,d in zip(ts,vs,ds)]
+
+
+
+def flatten_blocks(blocks):
+    for i,tvds in enumerate(blocks):
+        yield from tvds[1 if i else 0:]
+
+
+def lerp(t, t0, t1, v0, v1):
+    tv = (t - t0) / (t1 - t0)
+    return v0 + (v1 - v0) * tv
