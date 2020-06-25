@@ -1,11 +1,11 @@
 import os, sys
 from collections import namedtuple
 import copy
+import math
 import logging
 
-
 from .ebb import parse_commands, stepmode_to_microstepping
-from .ebb import SERVO_MAX, SERVO_MIN, LM_FREQUENCY
+from .ebb import SERVO_MAX, SERVO_MIN, LM_FREQUENCY, LM_RATE_FACTOR
 from .axidraw import STEPS_PER_MM_AT_1X, angle_to_pen_height
 from .util.misc import lerp
 
@@ -279,31 +279,14 @@ class AxidrawState(EbbState):
 
 
 def lm_sim_time(rate1, steps1, delta1, rate2, steps2, delta2):
-    steps1 = abs(steps1)
-    steps2 = abs(steps2)
-    acc1 = s1 = 0
-    acc2 = s2 = 0
+    return max(lm_sim_time_axis(rate1, steps1, delta1),
+               lm_sim_time_axis(rate2, steps2, delta2))
 
-    n = 0
-
-    axis1 = axis2 = True
-    while axis1 or axis2:
-        if axis1:
-            acc1 = (acc1 + rate1) % 0x100000000
-            rate1 += delta1
-            if acc1 >= 0x80000000:
-                acc1 -= 0x80000000
-                s1 += 1
-            axis1 = s1 < steps1
-
-        if axis2:
-            acc2 = (acc2 + rate2) % 0x100000000
-            rate2 += delta2
-            if acc2 >= 0x80000000:
-                acc2 -= 0x80000000
-                s2 += 1
-            axis2 = s2 < steps2
-        n +=1
-
-    return n/LM_FREQUENCY
-
+def lm_sim_time_axis(rate0, steps, delta):
+    if steps:
+        v0 = rate0 / LM_RATE_FACTOR
+        v1sq = v0*v0 + (2*delta*LM_FREQUENCY*abs(steps))/LM_RATE_FACTOR
+        v1 = math.sqrt(v1sq) if v1sq > 0 else 0
+        return 2 * abs(steps) / (v0+v1)
+    else:
+        return 0
