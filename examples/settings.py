@@ -8,7 +8,7 @@ import threading
 import npyscreen, curses
 
 from axidrawcontrol import  SerialEbb
-from axidrawcontrol.axidraw import CommandsBuilder, MotionSettings
+from axidrawcontrol.axidraw import CommandsBuilder, parse_settings
 from axidrawcontrol.plotter import do_plot
 
 sample = '''
@@ -52,11 +52,11 @@ class MainForm(npyscreen.FormWithMenus):
         self.axidraw = CommandsBuilder()
         
         self.settings_values = dict(
-            pen_up=1,
-            pen_down=.8,
-            velocity=.5,
-            acceleration=.5,
-            cornering=.5,
+            pen_up='80%',
+            pen_down='20%',
+            max_velocity='50%',
+            acceleration='50%',
+            cornering='50%',
         )
         if filename and os.path.isfile(filename):
             try:
@@ -75,20 +75,20 @@ class MainForm(npyscreen.FormWithMenus):
 
         def set_val_from_slider(name):
             def f(slider):
-                val = slider.value/100
-                self.settings_values[name] = val
+                val = slider.value
+                self.settings_values[name] = str(val) + '%'
                 if live_adjust.value:
                     if name == 'pen_up':
-                        self.ebb.run(self.axidraw.raise_pen(val, speed=5))
+                        self.ebb.run(self.axidraw.raise_pen(val/100, speed=5))
                     if name == 'pen_down':
-                        self.ebb.run(self.axidraw.lower_pen(val, speed=5))
+                        self.ebb.run(self.axidraw.lower_pen(val/100, speed=5))
             return f
         for key in [
-            'pen_up', 'pen_down', 'velocity', 'acceleration', 'cornering',
+            'pen_up', 'pen_down', 'max_velocity', 'acceleration', 'cornering',
         ]:
             name = key.replace('_', ' ').title()
             s  = self.add(npyscreen.TitleSliderPercent, name=name, accuracy=0)
-            s.entry_widget.value = self.settings_values.get(key, .5)*100
+            s.entry_widget.value = float(str(self.settings_values.get(key, 50)).rstrip('%'))
             set_callback_on_titled(s, set_val_from_slider(key))
 
 
@@ -111,7 +111,7 @@ class MainForm(npyscreen.FormWithMenus):
         def task():
             try:
                 def commands():
-                    settings = MotionSettings(**self.settings_values)
+                    settings = parse_settings(self.settings_values)
                     for path in sample:
                         yield from self.axidraw.draw_path(path, settings)
                 do_plot(self.ebb, commands(), file=self.parentApp, stop_event=self.stop_event)

@@ -5,7 +5,7 @@ import json
 
 
 from axidrawcontrol import SerialEbb
-from axidrawcontrol.axidraw import CommandsBuilder, MotionSettings
+from axidrawcontrol.axidraw import CommandsBuilder, parse_settings
 from axidrawcontrol.plotter import do_plot
 from axidrawcontrol.util.misc import pairwise
 from axidrawcontrol.util.svg import find_paths
@@ -26,16 +26,19 @@ def main():
     logging.getLogger('axidrawcontrol.motionplanning').setLevel(logging.WARN)
 
 
-    settings = MotionSettings()
+    settings = parse_settings()
 
-    fn = args.settings
-    if os.path.isfile(fn):
-        try:
-            settings = MotionSettings(**json.load(open(fn)))
-        except json.JSONDecodeError:
-            logger.error('cannot parse `%s` as json', fn)
-    else:
-        logger.error('cannot read `%s`', fn)
+    if args.settings:
+        fn = args.settings
+        if os.path.isfile(fn):
+            try:
+                settings = parse_settings(json.load(open(fn)))
+            except json.JSONDecodeError:
+                logger.error('cannot parse `%s` as json', fn)
+        else:
+            logger.error('cannot read `%s`', fn)
+
+    print(settings)
 
 
     def ebb_commands():

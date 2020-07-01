@@ -110,3 +110,32 @@ def pretty_time_delta(seconds):
         return '%02d:%02d:%02d' % (hours, minutes, seconds)
     else:
         return '%02d:%02d' % (minutes, seconds)
+
+
+
+from pint import UnitRegistry, DimensionalityError
+unitRegistry = UnitRegistry()
+unitRegistry.define('pt = point')
+Quantity = unitRegistry.Quantity
+
+def as_unit(v,u):
+    if u:
+        q = Quantity(v)
+        if q.dimensionless:
+            return float(v)
+        else:
+            return q.m_as(u)
+    else:
+        return float(v)
+
+def parse_value(v, default, minmax, unit=None):
+    if v == None:
+        v = default
+    try:
+        if isinstance(v, str) and v.endswith('%'):
+            t = float(v.replace('%', ''))/100
+            return lerp_clamp(t, 0,1, as_unit(minmax[0], unit), as_unit(minmax[1], unit))
+        else:
+            return as_unit(v, unit)
+    except DimensionalityError as e:
+        raise ValueError('`%s` not convertible to %s' % (v,unit))

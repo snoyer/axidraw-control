@@ -1,1 +1,1 @@
-{"pen_up": 0.35, "pen_down": 0.21, "velocity": 1.0, "acceleration": 0.6, "cornering": 0.5}
+{"pen_up": "40.0%", "pen_down": "10.0%", "max_velocity": "50%", "acceleration": "50%", "cornering": "50%"}

@@ -12,6 +12,6 @@ setup(name='axidrawcontrol',
         'pyserial', 'pyserial-asyncio',
         'svgelements',
         'numpy', 'rdp',
-        'pdfrw',
+        'pint',
     ],
 )
