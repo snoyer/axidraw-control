@@ -257,7 +257,8 @@ class SerialEbb(object):
             port = find_EBB_port()
 
         try:
-            self.serialport = serial.Serial(port, timeout=0)
+            read_timeout = 0.05
+            self.serialport = serial.Serial(port, timeout=read_timeout)
         except OSError as e:
             if e.errno == 16:
                 raise SerialEbbError('port `%s` busy' % port)
@@ -295,7 +296,7 @@ class SerialEbb(object):
 
 
     def _read_responses(self, parsed_commands, total_timeout=0):
-        readbuffer = self.serialport.readline()
+        readbuffer = self.serialport.read(512)
 
         giveup_time = time.time() + total_timeout
 
@@ -318,7 +319,7 @@ class SerialEbb(object):
                     readbuffer = readbuffer[m.end():]
                     break
                 else:
-                    readbuffer += self.serialport.readline()
+                    readbuffer += self.serialport.read(512)
 
             if response_bytes != None:
                 yield response_bytes
@@ -372,7 +373,11 @@ class AioSerialEbb(object):
                     else:
                         raise SerialEbbError('port `%s` busy' % port)
                 else:
-                    raise SerialEbbError(e.strerror)
+                    if time.time() <= retry_until:
+                        logger.info('cannot connect to port `%s`, retrying...', port)
+                        await asyncio.sleep(1)
+                    else:
+                        raise SerialEbbError(e)
 
         self = cls(reader, writer, command_timeout)
 
@@ -396,8 +401,11 @@ class AioSerialEbb(object):
 
 
     async def run(self, command_or_commands):
-        sent = await self.send(command_or_commands)
-        return [response.decode(ENCODING) async for response in self.reiceive()]
+        try:
+            sent = await self.send(command_or_commands)
+            return [response.decode(ENCODING) async for response in self.reiceive()]
+        except serial.SerialException as e:
+            raise SerialEbbError(e)
 
 
     async def send(self, command_or_commands):

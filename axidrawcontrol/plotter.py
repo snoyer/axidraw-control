@@ -32,7 +32,6 @@ def simulate_and_batch(commands, state=None):
     for batch in split_iterable(simulated, between=break_between):
 
         travel = list(uniq(s.state.pen_position for s in batch))
-
         yield SimulatedBatch(
             [s.command for s in batch],
             batch[ 0].state,
@@ -120,7 +119,7 @@ def do_plot_iter(ebb, commands, walk_hull=False, state=None, stop_event=None):
             actual_commands = chain(['CU,1,0\r'], simulated_batch.commands)
 
         expected_run_time = simulated_batch.end_state.timer_time - simulated_batch.start_state.timer_time
-        ebb.run(actual_commands, timeout= expected_run_time+1)
+        ebb.run(actual_commands, timeout=expected_run_time)
 
         
         clock_time = time.time() - started_at
